@@ -1,0 +1,26 @@
+# Environment variables (contains sensitive information)
+.env
+
+# Python virtual environment
+.venv/
+venv/
+env/
+pymupdf-venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Data directories
+chunks_csv/
+pdfs/
+qa_jsonl/
+
+# macOS
+.DS_Store
+
+# IDE settings
+.vscode/
+.idea/
