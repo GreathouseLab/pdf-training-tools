@@ -256,6 +256,31 @@ def generate_qas_from_chunk_together(
         raise ValueError("parsed JSON but no valid Q/A items")
     return out
 
+#-----------SUMMARY REPORT FUNCTION----------------
+def write_summary_report(jl_path: Path, model: str, total_chunks: int, wrote: int,
+                         mcq_count: int, reasoning_count: int, freeform_count: int):
+    """Create a human-readable summary for model comparison."""
+    summary_path = jl_path.parent / f"{jl_path.stem}_SUMMARY.txt"
+
+    with open(summary_path, "w", encoding="utf-8") as f:
+        f.write(f"=" * 60 + "\n")
+        f.write(f"Q/A Generation Summary\n")
+        f.write(f"=" * 60 + "\n")
+        f.write(f"Model: {model}\n")
+        f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Input File: {jl_path.stem.replace('_qa', '')}\n")
+        f.write(f"\nChunks Processed: {total_chunks}\n")
+        f.write(f"Total Q/A Items: {wrote}\n")
+        f.write(f"\nBreakdown by Type:\n")
+        f.write(f"  - MCQs: {mcq_count}\n")
+        f.write(f"  - Reasoning: {reasoning_count}\n")
+        f.write(f"  - Free-form: {freeform_count}\n")
+        f.write(f"\nAverage Q/A per Chunk: {(wrote/max(total_chunks,1)):.2f}\n")
+        f.write(f"Acceptance Rate: {((mcq_count + reasoning_count)/max(total_chunks,1)*100):.1f}%\n")
+        f.write(f"=" * 60 + "\n")
+
+    logging.info(f"Wrote summary: {summary_path}")
+
 #-----------COMBINED PIPELINE FUNCTION (Orchestrator)----------------
 def process_chunk_all(chunk: str, model: str, k_free_qas: int = 3) -> dict:
     """
@@ -361,8 +386,11 @@ def run_pipeline(args: argparse.Namespace):
             rate_delay = 60.0 / max(args.rpm, 1)
 
             wrote = 0
+            mcq_count = 0
+            reasoning_count = 0
+            freeform_count = 0
             logging.info(f"Generating Q/A for {pdf.name} (chunks: {len(chunks)})...")
-            
+
             with open(jl_path, "w", encoding="utf-8") as f:
                 for j, ch in enumerate(chunks):
                     logging.info(f"Processing chunk {j+1}/{len(chunks)}...")
@@ -387,6 +415,8 @@ def run_pipeline(args: argparse.Namespace):
                             for idx, mcq in enumerate(structured.get("mcqs", [])):
                                 rec = {
                                     "type": "mcq",
+                                    "model": args.llm_model,
+                                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
                                     "file": pdf.name,
                                     "chunk_id": j,
                                     "qa_id": f"mcq-{j}-{idx}",
@@ -397,14 +427,20 @@ def run_pipeline(args: argparse.Namespace):
                                     "difficulty": mcq.get("difficulty"),
                                     "critique": mcq.get("critique"),
                                 }
-                                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                                if args.pretty_json:
+                                    f.write(json.dumps(rec, ensure_ascii=False, indent=2) + "\n---\n")
+                                else:
+                                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                                 wrote += 1
+                                mcq_count += 1
 
                             # reasoning item
                             if structured.get("reasoning"):
                                 ritem = structured["reasoning"]
                                 rec = {
                                     "type": "reasoning",
+                                    "model": args.llm_model,
+                                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
                                     "file": pdf.name,
                                     "chunk_id": j,
                                     "qa_id": f"reason-{j}",
@@ -414,13 +450,19 @@ def run_pipeline(args: argparse.Namespace):
                                     "rubric": ritem["rubric"],
                                     "difficulty": ritem.get("difficulty"),
                                 }
-                                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                                if args.pretty_json:
+                                    f.write(json.dumps(rec, ensure_ascii=False, indent=2) + "\n---\n")
+                                else:
+                                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                                 wrote += 1
+                                reasoning_count += 1
 
                         # 2) free-form Q/As from original generator
                         for i, qa in enumerate(res.get("free_qas", [])):
                             rec = {
                                 "type": "freeform",
+                                "model": args.llm_model,
+                                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
                                 "file": pdf.name,
                                 "chunk_id": j,
                                 "qa_id": f"ff-{j}-{i}",
@@ -428,8 +470,12 @@ def run_pipeline(args: argparse.Namespace):
                                 "question": qa["question"],
                                 "answer": qa["answer"],
                             }
-                            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                            if args.pretty_json:
+                                f.write(json.dumps(rec, ensure_ascii=False, indent=2) + "\n---\n")
+                            else:
+                                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                             wrote += 1
+                            freeform_count += 1
 
                     except Exception as e:
                         logging.error(f"[gen_qa] Unhandled exception on {pdf.name} chunk {j}: {e}")
@@ -437,6 +483,10 @@ def run_pipeline(args: argparse.Namespace):
                     time.sleep(rate_delay)
 
             logging.info(f"Wrote Q/A JSONL: {jl_path.resolve()}  (rows: {wrote})")
+
+            # Write summary report for easy model comparison
+            write_summary_report(jl_path, args.llm_model, len(chunks), wrote,
+                               mcq_count, reasoning_count, freeform_count)
 
 #-----------MAIN ENTRY POINT----------------
 if __name__ == "__main__":
@@ -453,6 +503,7 @@ if __name__ == "__main__":
     ap.add_argument("--llm_model", default=os.getenv("TOGETHER_MODEL"), help="Together model id for generation")
     ap.add_argument("--rpm", type=int, default=30, help="Rate limit (requests per minute)")
     ap.add_argument("--qa_out", default="qa_jsonl", help="Output folder for Q/A JSONL files")
+    ap.add_argument("--pretty_json", action="store_true", help="Output pretty-printed JSON for human readability")
   
     args = ap.parse_args()
 
