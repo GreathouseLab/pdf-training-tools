@@ -1,3 +1,4 @@
+# onc_nutri_triage_prompt.py a module to build prompts for oncology nutrition paper triage that gates which papers are allowed to feed into the Q&A pipeline.
 
 from dataclasses import dataclass, asdict, field
 from typing import List, Dict, Any
@@ -5,6 +6,7 @@ import json
 import argparse
 import sys
 from textwrap import dedent
+from string import Template
 
 # ------------------------------
 # Data model (lightweight schema)
@@ -43,11 +45,11 @@ class TriagePayload:
 # ------------------------------
 
 SYSTEM_PROMPT = (
-    "You are an oncology nutrition and pharmacology analyst. "
+    "You are an oncology nutrition, cancer biology, and pharmacology analyst. "
     "Be precise, and cite exact spans with page/section locations."
 )
 
-USER_PROMPT_TEMPLATE = """\
+USER_PROMPT_TEMPLATE = ("""\
 From the paper below, extract ONLY what is needed to create clinically useful, answerable Q&A for oncology nutrition. 
 Return STRICT JSON with keys exactly as follows:
 - paper_meta: {title, venue, year, study_type ∈ [guideline,RCT,meta,mechanistic,observational,case,review], population, cancer_types, treatments, country_or_setting}
@@ -63,7 +65,7 @@ Paper:
 <<<BEGIN PAPER>>>
 {paper_text}
 <<<END PAPER>>>
-"""
+""")
 
 STRICT_JSON_INSTRUCTIONS = """\
 Rules:

@@ -1,7 +1,7 @@
 
 """
 Skeleton that shows EXACTLY where to call each prompt and how to parse outputs.
-Integrate these functions into your mupdf_trainer.py after chunking.
+Integrates functions into mupdf_trainer.py after chunking.
 """
 
 import json, random

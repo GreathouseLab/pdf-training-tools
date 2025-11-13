@@ -74,7 +74,7 @@ augmented_chunk:
 - ...
 """)
 
-# ---------- 3) Multiple-choice question generation ----------
+# ---------- 3) Multiple-choice question generation (MCQ) ----------
 
 MCQ_SYSTEM = dedent("""\
 You are an expert item-writer creating high-quality multiple-choice questions for biomedical topics.

@@ -1,5 +1,36 @@
 #Updated version of mupdf_trainer.py to reflect recent changes
+#reads through a PDF, extracts text, chunks it, and for each chunk,
+#asks an LLM to generate Q/A pairs, then embeds those using DeepSeek R1
+#and stores them in Pinecone.
 
+# python -m venv .venv
+# source .venv/bin/activate
+# pip install pymupdf openai python-dotenv tqdm pinecone matplotlib pydantic deepseek together
+# python -m venv pymupdf-venv
+# . pymupdf-venv/bin/activate
+# python -m pip install --upgrade pip
+# pip install --upgrade pymupdf
+# pip install -r requirements.txt 
+# export OPENAI_API_KEY=...
+# export DEEPSEEK_API_KEY=...
+# export PINECONE_API_KEY=......
+# export PINECONE_ENV=...us-west1-gcp
+# export MODEL=gpt-5-mini
+# export PINECONE_INDEX=paper-qa
+# python mupdf_trainer_v2.py ./pdfs --k 1 --chunk_size 800 --chunk_overlap 50
+# (where ./pdfs is a folder of PDFs to process)
+# togerher model = OpenAI/gpt-oss-20B or meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo
+
+#function process_pdf_folder(folder_path):
+ #   initialize total_pages = 0
+  #  for each PDF in folder:
+   #     extract pages from PDF
+    #    for each page:
+     #       extract text
+      #      embed text using DeepSeek R1
+       #     store embedding in Pinecone
+        #    total_pages += 1
+    #return total_pages
 
 #-----------IMPORTS----------------
 from pathlib import Path
@@ -29,7 +60,7 @@ import prompts_qa as prompts
 # === PTPC: imports (unchanged) ===
 from onc_nutri_triage_prompt import build_messages, validate_triage_json
 # from llm_adapter import llm_chat # This 'llm_chat' is for PTPC, separate from our pipeline
-from llm_adapter import llm_chat as ptpc_llm_chat, llm_smoke_test
+from llm_adapter import llm_chat,llm_smoke_test
 
 #-----------SETUP----------------
 load_dotenv()  # Load environment variables from .env file
@@ -145,13 +176,23 @@ def _extract_json_generic(text: str) -> Any:
     if m:
         t = m.group(1).strip()
 
-    # try direct JSON first
+    # try direct JSON first (accepts both objects and arrays)
     try:
         data = json.loads(t)
-        if isinstance(data, list):
+        if isinstance(data, (dict, list)):
             return data
     except Exception:
         pass
+
+    # fallback: find the first JSON object {...} anywhere in the string
+    m = re.search(r"\{[\s\S]*?\}", t)
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
 
     # fallback: find the first JSON array [...] anywhere in the string
     m = re.search(r"\[[\s\S]*?\]", t)  # non-greedy, matches across newlines
@@ -163,7 +204,7 @@ def _extract_json_generic(text: str) -> Any:
         except Exception:
             pass
 
-    raise ValueError("could not parse JSON list from model output")
+    raise ValueError("could not parse JSON (object or array) from model output")
 
 #-----------FREE-FORM Q/A GENERATOR (Original)----------------
 def build_messages_freeform(passage: str, k: int) -> list[dict]:
@@ -403,7 +444,7 @@ if __name__ == "__main__":
     ap.add_argument("path", help="PDF file OR a folder containing PDFs")
     ap.add_argument("--max_words", type=int, default=800)
     ap.add_argument("--overlap_words", type=int, default=50)
-    ap.add_argument("--out_dir", default="chunks_csv", help="Folder for per-PDF CSVs/TXDs")
+    ap.add_argument("--out_dir", default="chunks_csv", help="Folder for per-PDF CSVs/TXTs")
     ap.add_argument("--save_format", choices=["txt","csv"], default="csv")
     ap.add_argument("--llm_smoke_test", action="store_true", help="Ping Together Chat API and exit")
   
