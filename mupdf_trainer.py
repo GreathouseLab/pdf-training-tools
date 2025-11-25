@@ -366,8 +366,36 @@ def generate_qa_from_pdf(pdf_path: str, model: str, out_path: str, k_free_qas: i
         results.append(r)
 
     with open(out_path, "w", encoding="utf-8") as f:
-        for row in results:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        for rec in results:
+            if args.pretty_json:
+                f.write(json.dumps(rec, ensure_ascii=False, indent=2) + "\n---\n")
+            else:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+def write_summary_report(jl_path: Path, model: str, total_chunks: int, wrote: int, 
+                         mcq_count: int, reasoning_count: int, freeform_count: int):
+    """Create a human-readable summary for model comparison."""
+    summary_path = jl_path.parent / f"{jl_path.stem}_SUMMARY.txt"
+    
+    with open(summary_path, "w", encoding="utf-8") as f:
+        f.write(f"=" * 60 + "\n")
+        f.write(f"Q/A Generation Summary\n")
+        f.write(f"=" * 60 + "\n")
+        f.write(f"Model: {model}\n")
+        f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Input File: {jl_path.stem.replace('_qa', '')}\n")
+        f.write(f"\nChunks Processed: {total_chunks}\n")
+        f.write(f"Total Q/A Items: {wrote}\n")
+        f.write(f"\nBreakdown by Type:\n")
+        f.write(f"  - MCQs: {mcq_count}\n")
+        f.write(f"  - Reasoning: {reasoning_count}\n")
+        f.write(f"  - Free-form: {freeform_count}\n")
+        f.write(f"\nAcceptance Rate: {(wrote/max(total_chunks,1)*100):.1f}%\n")
+        f.write(f"=" * 60 + "\n")
+    
+    logging.info(f"Wrote summary: {summary_path}")
+    write_summary_report(jl_path, args.llm_model, len(chunks), wrote, mcq_count, reasoning_count, freeform_count)   
+    
 
 #-----------MAIN PROCESSING LOOP----------------
 if __name__ == "__main__":
@@ -382,7 +410,7 @@ if __name__ == "__main__":
     ap.add_argument("--out_dir", default="chunks_csv", help="Folder for per-PDF CSVs")
     ap.add_argument("--save_format", choices=["txt","csv"], default="csv")
     ap.add_argument("--llm_smoke_test", action="store_true", help="Ping Together Chat API and exit")
-  
+    ap.add_argument("--pretty_json", action="store_true", help="Output pretty-printed JSON instead of compact JSONL")
     ap.add_argument("--gen_qa", action="store_true", help="Call LLM on each chunk and write Q/A JSONL")
     ap.add_argument("--qa_k", type=int, default=1, help="Q/A pairs per chunk")
     ap.add_argument("--llm_model", default=os.getenv("TOGETHER_MODEL"), help="Together model id for generation")
@@ -452,6 +480,8 @@ if args.gen_qa:
                     for idx, mcq in enumerate(structured.get("mcqs", [])):
                         rec = {
                             "type": "mcq",
+                            "model": args.llm_model,
+                            "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
                             "file": pdf.name,
                             "chunk_id": j,
                             "qa_id": f"mcq-{j}-{idx}",
@@ -464,6 +494,7 @@ if args.gen_qa:
                         }
                         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                         wrote += 1
+                        mcq_count += 1
 
                     # reasoning item
                     if structured.get("reasoning"):
@@ -481,6 +512,7 @@ if args.gen_qa:
                         }
                         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                         wrote += 1
+                        reasoning_count += 1
 
                 # 2) free-form Q/As from original generator
                 for i, qa in enumerate(res.get("free_qas", [])):
@@ -495,6 +527,7 @@ if args.gen_qa:
                     }
                     f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                     wrote += 1
+                    freeform_count += 1
 
             except Exception as e:
                 print(f"[gen_qa] {pdf.name} chunk {j}: {e}")

@@ -74,13 +74,13 @@ augmented_chunk:
 - ...
 """)
 
-# ---------- 3) Multiple-choice question generation (MCQ) ----------
+# ---------- 3) Multiple-choice question generation  ----------
 
 MCQ_SYSTEM = dedent("""\
 You are an expert item-writer creating high-quality multiple-choice questions for biomedical topics.
 Each question must be self-contained and test understanding (not trivia).
 """)
-
+# added line to MCQ prompt below to be grounded in biomedical knowledge
 MCQ_USER = dedent("""\
 Using the content below, write ONE multiple-choice question with exactly {num_answers} options.
 Place the correct answer at position {target_correct_position}. Ensure distractors are plausible but incorrect.
@@ -95,6 +95,7 @@ REQUIREMENTS:
 - Graduate-level difficulty; avoid rote recall.
 - Self-contained wording (no 'as mentioned above').
 - Keep question stem under 2 sentences.
+- Each correct/incorrect answer should be grounded in published biomedical knowledge that is relevant to the CONTEXT.
 
 Return ONLY this JSON:
 {{
@@ -149,10 +150,11 @@ REASON_SYSTEM = dedent("""\
 You are an expert researcher who writes challenging, reasoning-heavy free-response questions for biomedical topics.
 Questions must assess deep understanding (mechanisms, limitations, alternative explanations, trade-offs).
 """)
-
+#added third line to reasoning prompt below
 REASON_USER = dedent("""\
 From the CONTEXT below, produce ONE challenging free-response question that requires systematic reasoning.
 Also provide a concise expert answer and a short grading rubric (no chain-of-thought; concise bullet justification).
+Each answer should be grounded in published biomedical knowledge that is relevant to the CONTEXT.
 
 CONTEXT:
 {context_text}

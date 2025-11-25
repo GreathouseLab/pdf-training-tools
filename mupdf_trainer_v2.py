@@ -2,6 +2,8 @@
 #reads through a PDF, extracts text, chunks it, and for each chunk,
 #asks an LLM to generate Q/A pairs, then embeds those using DeepSeek R1
 #and stores them in Pinecone.
+#this command runs the environment setup and the script:cd /Users/leigh_greathouse/Documents/My_Code/Python_code
+#bash setup_and_run.sh
 
 # python -m venv .venv
 # source .venv/bin/activate
@@ -52,12 +54,12 @@ import pymupdf
 
 from together import Together 
 
-# Import the refactored skeleton
+# Import the v2 skeleton
 import qa_pipeline_skeleton_v2 as qps   
 # Prompts file is unchanged
 import prompts_qa as prompts        
 
-# === PTPC: imports (unchanged) ===
+# === PTPC: imports (unchanged) === #not using curretly
 from onc_nutri_triage_prompt import build_messages, validate_triage_json
 # from llm_adapter import llm_chat # This 'llm_chat' is for PTPC, separate from our pipeline
 from llm_adapter import llm_chat,llm_smoke_test
@@ -69,7 +71,7 @@ logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("pinecone").setLevel(logging.WARNING)
 
 
-#-----------LLM ADAPTER (This is our "real" implementation)----------------
+#-----------LLM ADAPTER----------------
 def llm_chat_together(
     model: str,
     messages: list[dict],
@@ -281,11 +283,15 @@ def write_summary_report(jl_path: Path, model: str, total_chunks: int, wrote: in
 
     logging.info(f"Wrote summary: {summary_path}")
 
+#-----------DATABASE OUTPUT FORMATING FOR JSONL----------------
+def process_jsonl_qa(rec, index):
+
+   
+
 #-----------COMBINED PIPELINE FUNCTION (Orchestrator)----------------
 def process_chunk_all(chunk: str, model: str, k_free_qas: int = 3) -> dict:
     """
     Runs the full 5-stage pipeline AND the free-form QA generator.
-    This is where the "injection" happens.
     """
     
     # 1) Run the relevance→augment→MCQ→score→reasoning pipeline
