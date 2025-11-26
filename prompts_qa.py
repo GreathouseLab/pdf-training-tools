@@ -95,7 +95,14 @@ REQUIREMENTS:
 - Graduate-level difficulty; avoid rote recall.
 - Self-contained wording (no 'as mentioned above').
 - Keep question stem under 2 sentences.
-- Each correct/incorrect answer should be grounded in published biomedical knowledge that is relevant to the CONTEXT.
+- Base ONLY the correct answer on facts explicitly stated in the CONTEXT. Do NOT introduce biological processes, mechanisms, or pathways not mentioned in the CONTEXT.
+- Distractors should be plausible but clearly contradicted by or absent from the CONTEXT.
+
+CRITICAL - ANTI-HALLUCINATION RULES:
+- Use ONLY information explicitly present in the CONTEXT above.
+- Do NOT invent biological processes, mechanisms, pathways, or terminology not in the CONTEXT.
+- Do NOT draw from general biomedical knowledge beyond what the CONTEXT states.
+- If the CONTEXT lacks sufficient detail for a good question, acknowledge this limitation rather than fabricating details.
 
 Return ONLY this JSON:
 {{
@@ -154,10 +161,16 @@ Questions must assess deep understanding (mechanisms, limitations, alternative e
 REASON_USER = dedent("""\
 From the CONTEXT below, produce ONE challenging free-response question that requires systematic reasoning.
 Also provide a concise expert answer and a short grading rubric (no chain-of-thought; concise bullet justification).
-Each answer should be grounded in published biomedical knowledge that is relevant to the CONTEXT.
+The answer must be derived EXCLUSIVELY from the CONTEXT provided. Do NOT introduce mechanisms, pathways, or biological processes not explicitly mentioned in the CONTEXT.
 
 CONTEXT:
 {context_text}
+
+CRITICAL - ANTI-HALLUCINATION RULES:
+- Use ONLY information explicitly present in the CONTEXT above.
+- Do NOT invent biological processes, mechanisms, pathways, or terminology not in the CONTEXT.
+- Do NOT draw from general biomedical knowledge beyond what the CONTEXT states.
+- If the CONTEXT lacks sufficient detail for a good question, acknowledge this limitation rather than fabricating details.
 
 Return ONLY this JSON:
 {{
