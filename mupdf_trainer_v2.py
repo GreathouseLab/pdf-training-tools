@@ -282,10 +282,6 @@ def write_summary_report(jl_path: Path, model: str, total_chunks: int, wrote: in
         f.write(f"=" * 60 + "\n")
 
     logging.info(f"Wrote summary: {summary_path}")
-
-#-----------DATABASE OUTPUT FORMATING FOR JSONL----------------
-def process_jsonl_qa(rec, index):
-
    
 
 #-----------COMBINED PIPELINE FUNCTION (Orchestrator)----------------
