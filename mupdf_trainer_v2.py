@@ -260,7 +260,8 @@ def generate_qas_from_chunk_together(
 
 #-----------SUMMARY REPORT FUNCTION----------------
 def write_summary_report(jl_path: Path, model: str, total_chunks: int, wrote: int,
-                         mcq_count: int, reasoning_count: int, freeform_count: int):
+                         mcq_count: int, reasoning_count: int, freeform_count: int,
+                         elapsed_time: float = 0.0):
     """Create a human-readable summary for model comparison."""
     summary_path = jl_path.parent / f"{jl_path.stem}_SUMMARY.txt"
 
@@ -279,9 +280,182 @@ def write_summary_report(jl_path: Path, model: str, total_chunks: int, wrote: in
         f.write(f"  - Free-form: {freeform_count}\n")
         f.write(f"\nAverage Q/A per Chunk: {(wrote/max(total_chunks,1)):.2f}\n")
         f.write(f"Acceptance Rate: {((mcq_count + reasoning_count)/max(total_chunks,1)*100):.1f}%\n")
+
+        if elapsed_time > 0:
+            hours = int(elapsed_time // 3600)
+            minutes = int((elapsed_time % 3600) // 60)
+            seconds = elapsed_time % 60
+            f.write(f"\nCompute Time: {hours:02d}:{minutes:02d}:{seconds:05.2f}\n")
+            f.write(f"Time per Chunk: {(elapsed_time/max(total_chunks,1)):.2f} seconds\n")
+            f.write(f"Time per Q/A: {(elapsed_time/max(wrote,1)):.2f} seconds\n")
+
         f.write(f"=" * 60 + "\n")
 
     logging.info(f"Wrote summary: {summary_path}")
+
+
+def generate_overall_summary(qa_dir: str = "qa_jsonl") -> None:
+    """
+    Scan all *_qa.jsonl files in the specified directory and generate
+    an overall summary report with statistics and compute times.
+    """
+    qa_path = Path(qa_dir)
+    if not qa_path.exists():
+        logging.error(f"Directory not found: {qa_path}")
+        return
+
+    jsonl_files = sorted(qa_path.glob("*_qa.jsonl"))
+    if not jsonl_files:
+        logging.error(f"No *_qa.jsonl files found in {qa_path}")
+        return
+
+    logging.info(f"Found {len(jsonl_files)} Q/A JSONL files to analyze")
+
+    # Collect stats for each file
+    file_stats = []
+    total_questions = 0
+    total_mcqs = 0
+    total_reasoning = 0
+    total_freeform = 0
+
+    for jl_file in jsonl_files:
+        stats = {
+            "filename": jl_file.name,
+            "pdf_name": jl_file.stem.replace("_qa", ""),
+            "total": 0,
+            "mcq": 0,
+            "reasoning": 0,
+            "freeform": 0,
+            "models": set(),
+            "timestamps": []
+        }
+
+        # Read the JSONL file
+        with open(jl_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # Handle both standard JSONL and multi-line JSON with --- separators
+        if '---' in content:
+            json_blocks = content.split('---')
+        else:
+            json_blocks = content.strip().split('\n')
+
+        for block in json_blocks:
+            block = block.strip()
+            if not block:
+                continue
+            try:
+                qa = json.loads(block)
+                if not isinstance(qa, dict):
+                    continue
+
+                stats["total"] += 1
+                qa_type = qa.get("type", "")
+
+                if qa_type == "mcq":
+                    stats["mcq"] += 1
+                elif qa_type == "reasoning":
+                    stats["reasoning"] += 1
+                elif qa_type == "freeform":
+                    stats["freeform"] += 1
+
+                if "model" in qa:
+                    stats["models"].add(qa["model"])
+                if "timestamp" in qa:
+                    stats["timestamps"].append(qa["timestamp"])
+
+            except json.JSONDecodeError:
+                continue
+
+        # Calculate time span if timestamps available
+        if stats["timestamps"]:
+            try:
+                timestamps_sorted = sorted(stats["timestamps"])
+                start_time = time.strptime(timestamps_sorted[0], '%Y-%m-%d %H:%M:%S')
+                end_time = time.strptime(timestamps_sorted[-1], '%Y-%m-%d %H:%M:%S')
+                duration = time.mktime(end_time) - time.mktime(start_time)
+                stats["duration"] = duration
+            except:
+                stats["duration"] = None
+        else:
+            stats["duration"] = None
+
+        file_stats.append(stats)
+        total_questions += stats["total"]
+        total_mcqs += stats["mcq"]
+        total_reasoning += stats["reasoning"]
+        total_freeform += stats["freeform"]
+
+    # Write overall summary report
+    summary_path = qa_path / "OVERALL_SUMMARY.txt"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        f.write("=" * 80 + "\n")
+        f.write("OVERALL Q/A GENERATION SUMMARY\n")
+        f.write("=" * 80 + "\n")
+        f.write(f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Directory: {qa_path.resolve()}\n")
+        f.write(f"\nTotal Files Analyzed: {len(jsonl_files)}\n")
+        f.write(f"Total Questions Generated: {total_questions}\n")
+        f.write(f"\nOverall Breakdown:\n")
+        f.write(f"  - MCQs: {total_mcqs} ({(total_mcqs/max(total_questions,1)*100):.1f}%)\n")
+        f.write(f"  - Reasoning: {total_reasoning} ({(total_reasoning/max(total_questions,1)*100):.1f}%)\n")
+        f.write(f"  - Free-form: {total_freeform} ({(total_freeform/max(total_questions,1)*100):.1f}%)\n")
+        f.write("\n" + "=" * 80 + "\n")
+        f.write("PER-FILE STATISTICS\n")
+        f.write("=" * 80 + "\n\n")
+
+        for stats in file_stats:
+            f.write(f"File: {stats['filename']}\n")
+            f.write(f"PDF: {stats['pdf_name']}\n")
+            f.write(f"Total Questions: {stats['total']}\n")
+            f.write(f"  - MCQs: {stats['mcq']}\n")
+            f.write(f"  - Reasoning: {stats['reasoning']}\n")
+            f.write(f"  - Free-form: {stats['freeform']}\n")
+
+            if stats['models']:
+                f.write(f"Models Used: {', '.join(sorted(stats['models']))}\n")
+
+            if stats['duration'] is not None:
+                hours = int(stats['duration'] // 3600)
+                minutes = int((stats['duration'] % 3600) // 60)
+                seconds = stats['duration'] % 60
+                f.write(f"Compute Time: {hours:02d}:{minutes:02d}:{seconds:05.2f}\n")
+                f.write(f"Time per Question: {(stats['duration']/max(stats['total'],1)):.2f} seconds\n")
+            else:
+                f.write(f"Compute Time: Not available (no timestamps or single timestamp)\n")
+
+            f.write("-" * 80 + "\n\n")
+
+        # Summary statistics
+        f.write("=" * 80 + "\n")
+        f.write("SUMMARY STATISTICS\n")
+        f.write("=" * 80 + "\n")
+        f.write(f"Average Questions per File: {(total_questions/len(file_stats)):.1f}\n")
+
+        files_with_time = [s for s in file_stats if s['duration'] is not None]
+        if files_with_time:
+            avg_duration = sum(s['duration'] for s in files_with_time) / len(files_with_time)
+            total_compute = sum(s['duration'] for s in files_with_time)
+
+            h = int(avg_duration // 3600)
+            m = int((avg_duration % 3600) // 60)
+            s = avg_duration % 60
+            f.write(f"Average Compute Time per File: {h:02d}:{m:02d}:{s:05.2f}\n")
+
+            h_total = int(total_compute // 3600)
+            m_total = int((total_compute % 3600) // 60)
+            s_total = total_compute % 60
+            f.write(f"Total Compute Time: {h_total:02d}:{m_total:02d}:{s_total:05.2f}\n")
+
+            avg_time_per_q = total_compute / sum(s['total'] for s in files_with_time)
+            f.write(f"Average Time per Question: {avg_time_per_q:.2f} seconds\n")
+
+        f.write("=" * 80 + "\n")
+
+    logging.info(f"Wrote overall summary: {summary_path}")
+    print(f"\n✓ Overall summary written to: {summary_path}")
+    print(f"  Total files analyzed: {len(jsonl_files)}")
+    print(f"  Total questions: {total_questions}")
    
 
 #-----------COMBINED PIPELINE FUNCTION (Orchestrator)----------------
@@ -319,6 +493,97 @@ def process_chunk_all(chunk: str, model: str, k_free_qas: int = 3) -> dict:
     return pipe_out
 
 
+#-----------MASTER SUMMARY FUNCTION----------------
+def write_master_summary(qa_dir: Path, run_stats: list[dict], run_start_time: float):
+    """
+    Write a master summary file combining statistics from all PDFs in this run.
+    """
+    if not run_stats:
+        return
+
+    run_elapsed = time.time() - run_start_time
+    total_pdfs = len(run_stats)
+    total_chunks = sum(s['chunks'] for s in run_stats)
+    total_questions = sum(s['questions'] for s in run_stats)
+    total_mcqs = sum(s['mcq'] for s in run_stats)
+    total_reasoning = sum(s['reasoning'] for s in run_stats)
+    total_freeform = sum(s['freeform'] for s in run_stats)
+    total_time = sum(s['elapsed'] for s in run_stats)
+
+    summary_path = qa_dir / f"MASTER_SUMMARY_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+
+    with open(summary_path, "w", encoding="utf-8") as f:
+        f.write("=" * 80 + "\n")
+        f.write("MASTER Q/A GENERATION SUMMARY - BATCH RUN\n")
+        f.write("=" * 80 + "\n")
+        f.write(f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Output Directory: {qa_dir.resolve()}\n")
+        f.write(f"\n{'='*80}\n")
+        f.write("OVERALL STATISTICS\n")
+        f.write(f"{'='*80}\n")
+        f.write(f"Total PDFs Processed: {total_pdfs}\n")
+        f.write(f"Total Chunks Processed: {total_chunks}\n")
+        f.write(f"Total Questions Generated: {total_questions}\n")
+        f.write(f"\nQuestion Type Breakdown:\n")
+        f.write(f"  - MCQs: {total_mcqs} ({(total_mcqs/max(total_questions,1)*100):.1f}%)\n")
+        f.write(f"  - Reasoning: {total_reasoning} ({(total_reasoning/max(total_questions,1)*100):.1f}%)\n")
+        f.write(f"  - Free-form: {total_freeform} ({(total_freeform/max(total_questions,1)*100):.1f}%)\n")
+
+        # Timing statistics
+        run_hours = int(run_elapsed // 3600)
+        run_minutes = int((run_elapsed % 3600) // 60)
+        run_seconds = run_elapsed % 60
+        f.write(f"\n{'='*80}\n")
+        f.write("TIMING STATISTICS\n")
+        f.write(f"{'='*80}\n")
+        f.write(f"Total Run Time: {run_hours:02d}:{run_minutes:02d}:{run_seconds:05.2f}\n")
+        f.write(f"Total Processing Time: {int(total_time//3600):02d}:{int((total_time%3600)//60):02d}:{total_time%60:05.2f}\n")
+        f.write(f"Average Time per PDF: {(total_time/max(total_pdfs,1)):.2f} seconds\n")
+        f.write(f"Average Time per Chunk: {(total_time/max(total_chunks,1)):.2f} seconds\n")
+        f.write(f"Average Time per Question: {(total_time/max(total_questions,1)):.2f} seconds\n")
+
+        # Per-PDF breakdown
+        f.write(f"\n{'='*80}\n")
+        f.write("PER-PDF BREAKDOWN\n")
+        f.write(f"{'='*80}\n\n")
+
+        for i, stats in enumerate(run_stats, 1):
+            f.write(f"[{i}/{total_pdfs}] {stats['pdf_name']}\n")
+            f.write(f"  Chunks: {stats['chunks']}\n")
+            f.write(f"  Total Questions: {stats['questions']}\n")
+            f.write(f"    - MCQs: {stats['mcq']}\n")
+            f.write(f"    - Reasoning: {stats['reasoning']}\n")
+            f.write(f"    - Free-form: {stats['freeform']}\n")
+
+            hours = int(stats['elapsed'] // 3600)
+            minutes = int((stats['elapsed'] % 3600) // 60)
+            seconds = stats['elapsed'] % 60
+            f.write(f"  Processing Time: {hours:02d}:{minutes:02d}:{seconds:05.2f}\n")
+            f.write(f"  Avg Time/Question: {(stats['elapsed']/max(stats['questions'],1)):.2f} sec\n")
+            f.write(f"  Output File: {stats['output_file']}\n")
+            f.write(f"{'-'*80}\n")
+
+        # Summary averages
+        f.write(f"\n{'='*80}\n")
+        f.write("AVERAGES\n")
+        f.write(f"{'='*80}\n")
+        f.write(f"Avg Chunks per PDF: {(total_chunks/max(total_pdfs,1)):.1f}\n")
+        f.write(f"Avg Questions per PDF: {(total_questions/max(total_pdfs,1)):.1f}\n")
+        f.write(f"Avg Questions per Chunk: {(total_questions/max(total_chunks,1)):.2f}\n")
+
+        if run_stats[0].get('model'):
+            f.write(f"\nModel Used: {run_stats[0]['model']}\n")
+
+        f.write(f"{'='*80}\n")
+
+    logging.info(f"Wrote master summary: {summary_path}")
+    print(f"\n{'='*80}")
+    print(f"✓ Master summary written to: {summary_path.name}")
+    print(f"  Total PDFs: {total_pdfs} | Total Questions: {total_questions}")
+    print(f"  Total Time: {run_hours:02d}:{run_minutes:02d}:{run_seconds:05.2f}")
+    print(f"{'='*80}\n")
+
+
 #-----------MAIN PIPELINE FUNCTION (Moved from __main__)----------------
 def run_pipeline(args: argparse.Namespace):
     """
@@ -337,6 +602,10 @@ def run_pipeline(args: argparse.Namespace):
     if not files:
         logging.error(f"No PDFs found in {p}")
         sys.exit(1)
+
+    # Track statistics for master summary
+    run_stats = []
+    run_start_time = time.time()
 
     for pdf in files:
         logging.info(f"\n=== Processing: {pdf.name} ===")
@@ -382,7 +651,7 @@ def run_pipeline(args: argparse.Namespace):
             if not args.llm_model:
                 logging.error("LLM model must be specified with --llm_model or TOGETHER_MODEL env var")
                 sys.exit(1)
-                
+
             out_dir = Path(args.qa_out); out_dir.mkdir(parents=True, exist_ok=True)
             jl_path = out_dir / f"{pdf.stem}_qa.jsonl"
             rate_delay = 60.0 / max(args.rpm, 1)
@@ -392,6 +661,9 @@ def run_pipeline(args: argparse.Namespace):
             reasoning_count = 0
             freeform_count = 0
             logging.info(f"Generating Q/A for {pdf.name} (chunks: {len(chunks)})...")
+
+            # Start timing
+            start_time = time.time()
 
             with open(jl_path, "w", encoding="utf-8") as f:
                 for j, ch in enumerate(chunks):
@@ -484,30 +756,64 @@ def run_pipeline(args: argparse.Namespace):
 
                     time.sleep(rate_delay)
 
+            # Calculate elapsed time
+            elapsed_time = time.time() - start_time
+            hours = int(elapsed_time // 3600)
+            minutes = int((elapsed_time % 3600) // 60)
+            seconds = elapsed_time % 60
+
             logging.info(f"Wrote Q/A JSONL: {jl_path.resolve()}  (rows: {wrote})")
+            logging.info(f"Compute time: {hours:02d}:{minutes:02d}:{seconds:05.2f}")
 
             # Write summary report for easy model comparison
             write_summary_report(jl_path, args.llm_model, len(chunks), wrote,
-                               mcq_count, reasoning_count, freeform_count)
+                               mcq_count, reasoning_count, freeform_count, elapsed_time)
+
+            # Collect statistics for master summary
+            run_stats.append({
+                'pdf_name': pdf.name,
+                'chunks': len(chunks),
+                'questions': wrote,
+                'mcq': mcq_count,
+                'reasoning': reasoning_count,
+                'freeform': freeform_count,
+                'elapsed': elapsed_time,
+                'output_file': jl_path.name,
+                'model': args.llm_model
+            })
+
+    # Write master summary if Q/A generation was performed
+    if args.gen_qa and run_stats:
+        out_dir = Path(args.qa_out)
+        write_master_summary(out_dir, run_stats, run_start_time)
 
 #-----------MAIN ENTRY POINT----------------
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Extract, chunk, and generate Q/A from PDFs.")
-    ap.add_argument("path", help="PDF file OR a folder containing PDFs")
+    ap.add_argument("path", nargs='?', help="PDF file OR a folder containing PDFs")
     ap.add_argument("--max_words", type=int, default=800)
     ap.add_argument("--overlap_words", type=int, default=50)
     ap.add_argument("--out_dir", default="chunks_csv", help="Folder for per-PDF CSVs/TXTs")
     ap.add_argument("--save_format", choices=["txt","csv"], default="csv")
     ap.add_argument("--llm_smoke_test", action="store_true", help="Ping Together Chat API and exit")
-  
+
     ap.add_argument("--gen_qa", action="store_true", help="Call LLM on each chunk and write Q/A JSONL")
     ap.add_argument("--qa_k", type=int, default=1, help="Free-form Q/A pairs per chunk")
     ap.add_argument("--llm_model", default=os.getenv("TOGETHER_MODEL"), help="Together model id for generation")
     ap.add_argument("--rpm", type=int, default=30, help="Rate limit (requests per minute)")
     ap.add_argument("--qa_out", default="qa_jsonl", help="Output folder for Q/A JSONL files")
     ap.add_argument("--pretty_json", action="store_true", help="Output pretty-printed JSON for human readability")
-  
+
+    ap.add_argument("--summarize", action="store_true", help="Generate overall summary of all *_qa.jsonl files and exit")
+    ap.add_argument("--summary_dir", default="qa_jsonl", help="Directory containing *_qa.jsonl files for summary")
+
     args = ap.parse_args()
+
+    # ---------- Early exit for overall summary ----------
+    if args.summarize:
+        logging.info(f"Generating overall summary from {args.summary_dir}...")
+        generate_overall_summary(args.summary_dir)
+        sys.exit(0)
 
     # ---------- Early exit for llm smoke test ----------
     if args.llm_smoke_test:
@@ -517,6 +823,10 @@ if __name__ == "__main__":
         llm_smoke_test()
         logging.info("Smoke test complete.")
         sys.exit(0)
-    
+
+    # Ensure path is provided for normal operation
+    if not args.path:
+        ap.error("the following arguments are required: path (unless using --summarize or --llm_smoke_test)")
+
     # Call the main pipeline function with the parsed args
     run_pipeline(args)
