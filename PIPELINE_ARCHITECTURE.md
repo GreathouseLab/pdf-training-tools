@@ -258,7 +258,7 @@ python compile_qa.py --input-dir qa_jsonl --output qa_output.csv
 ## Key Design Decisions
 
 ### Why freeform-only? (v3 vs v2)
-The v2 pipeline generated MCQs, reasoning questions, AND freeform Q/A. Per Nick's guidance at Argonne (2026-02-10):
+The v2 pipeline generated MCQs, reasoning questions, AND freeform Q/A. 
 - MCQ answers were 7-15 words — too long for exact-match RLHF grading
 - Reasoning was converted to MCQ format but was redundant
 - Freeform already produces clean 1-3 word answers gradable by exact string match
