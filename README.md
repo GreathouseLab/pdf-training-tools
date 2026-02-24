@@ -170,4 +170,3 @@ When `--enable-verification` is set, each Q/A pair goes through:
 ## Context
 
 This pipeline is part of the **NORE** (Nutrition-Oncology Research Engine) project at [Baylor University Greathouse Lab](https://github.com/GreathouseLab), developed in collaboration with Argonne National Lab. The generated Q/A datasets are used for RLHF fine-tuning of domain-specific language models on the Aurora supercomputer for clinical nutrition and oncology applications.
-
