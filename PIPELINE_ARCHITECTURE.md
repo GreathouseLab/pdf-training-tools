@@ -1,150 +1,231 @@
 # NORE Q/A Generation Pipeline — Architecture
 
-> **Version:** v3 (freeform-only)
-> **Last updated:** 2026-02-24
+> **Version:** v4 (Firecrawl integration)
+> **Last updated:** 2026-03-11
 > **Author:** Dr. K. Leigh Greathouse
-> **Purpose:** Generate short-answer Q/A training data from biomedical PDFs for RLHF grading at Argonne National Lab (Aurora supercomputer)
+> **Purpose:** Generate short-answer Q/A training data from biomedical papers for RLHF grading at Argonne National Lab (Aurora supercomputer)
 
 ---
 
 ## Overview
 
-The pipeline extracts text from biomedical PDFs, chunks it, generates freeform Q/A pairs via LLM, optionally verifies quality, deduplicates, and compiles to CSV for downstream RLHF training.
+The NORE (Nutrition Oncology Research Engine) pipeline is a two-stage system: **Harvest** papers, then **Train** Q/A pairs.
+
+**v4 key change:** Firecrawl is now the default text extraction method. Papers are extracted server-side as markdown — no local PDF download required. PDF download is available as an opt-in (`--download-pdfs`) for RLHF traceability.
 
 ```
-PDF files
-   │
-   ▼
-┌──────────────────────────┐
-│  mupdf_trainer_v3.py     │  Orchestrator (1,364 lines)
-│  ├─ Extract text (PyMuPDF)│
-│  ├─ Clean & chunk        │
-│  ├─ Gate (relevance)     │──▶ qa_pipeline_skeleton_v2.py
-│  ├─ Augment chunk        │──▶ qa_pipeline_skeleton_v2.py
-│  ├─ Generate freeform Q/A│──▶ prompts_qa.py
-│  ├─ Verify (optional)    │──▶ verification_qa.py
-│  └─ Write JSONL output   │
-└──────────┬───────────────┘
-           │  per-PDF *_qa.jsonl files
-           ▼
-┌──────────────────────────┐
-│  duplicate_triage.py     │  Phase 1: Excel triage workbook
-│  (human-in-the-loop)     │  Phase 2: Apply decisions → clean JSONL
-└──────────┬───────────────┘
-           │  qa_clean.jsonl
-           ▼
-┌──────────────────────────┐
-│  compile_qa.py           │  Final CSV export for RLHF grading
-└──────────────────────────┘
+  PubMed / Europe PMC
+         │
+         ▼
+┌─────────────────────────────┐
+│  nore_paper_harvester.py    │   Stage 1: Harvest
+│  ├─ Discover (MeSH queries) │
+│  ├─ Screen (LLM gate)       │
+│  ├─ Locate (OA PDF URL)     │
+│  └─ Extract text             │
+│     ├─ Firecrawl (default)   │ → .firecrawl.md + .meta.json
+│     └─ PDF download (opt-in) │ → .pdf + .meta.json
+└────────┬────────────────────┘
+         │
+         ▼
+  harvested_papers/
+  ├── drug_nutrient/
+  ├── cachexia_sarcopenia/
+  ├── immunotherapy_nutrition/
+  ├── cancer_malnutrition/
+  ├── dietary_patterns/
+  └── microbiome_diet_cancer/
+         │
+         ▼
+┌─────────────────────────────┐
+│  mupdf_trainer_v3.py        │   Stage 2: Train
+│  ├─ Text source routing      │   get_text() → auto|firecrawl|mupdf
+│  ├─ Chunk text               │
+│  ├─ Relevance gate           │
+│  ├─ Augment chunk            │
+│  ├─ Generate freeform Q/A    │
+│  ├─ Verify (optional)        │
+│  └─ Write JSONL output       │
+└────────┬────────────────────┘
+         │  per-PDF *_qa.jsonl files
+         ▼
+┌─────────────────────────────┐
+│  duplicate_triage.py        │   Phase 1: Excel triage workbook
+│  (human-in-the-loop)        │   Phase 2: Apply decisions → clean JSONL
+└────────┬────────────────────┘
+         │  qa_clean.jsonl
+         ▼
+┌─────────────────────────────┐
+│  compile_qa.py              │   Final CSV export for RLHF grading
+└─────────────────────────────┘
 ```
+
+---
+
+## Stage 1: Paper Harvester (`nore_paper_harvester.py`)
+
+### Pipeline Phases
+
+| Phase | Name | Description |
+|-------|------|-------------|
+| 1 | **Discover** | Query PubMed E-utilities + Europe PMC with topic-specific MeSH terms |
+| 2 | **Screen** | LLM relevance gate scores abstracts (default: gpt-4.1-mini, threshold ≥ 6) |
+| 3 | **Locate** | Find open-access PDF URL via PMC OA, Unpaywall, or Europe PMC |
+| 4 | **Extract** | Acquire paper text via Firecrawl (default) or PDF download |
+
+### Text Extraction Modes
+
+#### Default: Firecrawl (no local PDFs)
+- Sends the PDF URL to [Firecrawl](https://firecrawl.dev) for server-side extraction
+- Returns clean markdown; saved as `<stem>.firecrawl.md`
+- Metadata saved as `<stem>.firecrawl.meta.json`
+- No local PDF download — faster, less storage
+- Requires: `pip install firecrawl` + `FIRECRAWL_API_KEY` env var
+
+#### Opt-in: PDF Download (`--download-pdfs`)
+- Downloads the PDF binary to disk as `<stem>.pdf`
+- Metadata saved as `<stem>.meta.json`
+- Needed for RLHF traceability — keep original PDFs for auditing trained model outputs back to source text
+
+### Firecrawl SDK Settings
+
+Nick's recommended configuration for academic paper extraction:
+
+```python
+FIRECRAWL_SETTINGS = {
+    "only_main_content": False,    # Full paper including methods, supplementary
+    "max_age": 172800000,          # 48-hour cache (milliseconds)
+    "parsers": ["pdf"],            # Force PDF-specific parser
+    "formats": ["markdown"],       # Output as markdown
+}
+```
+
+### Topic Taxonomy (6 priority areas)
+
+| Key | Label | Priority |
+|-----|-------|----------|
+| `drug_nutrient` | Drug-Nutrient Interactions in Oncology | 1 |
+| `cachexia_sarcopenia` | Cancer Cachexia & Sarcopenia | 2 |
+| `immunotherapy_nutrition` | Immunotherapy & Nutrition | 3 |
+| `cancer_malnutrition` | Cancer-Related Malnutrition | 4 |
+| `dietary_patterns` | Dietary Patterns & Cancer Outcomes | 5 |
+| `microbiome_diet_cancer` | Microbiome, Diet & Cancer | 6 |
+
+Each topic defines 6-8 PubMed MeSH queries and 2-3 Europe PMC free-text queries.
+
+### Output Structure
+
+```
+harvested_papers/
+├── drug_nutrient/
+│   ├── Curcumin_interactions_a1b2c3d4.firecrawl.md
+│   ├── Curcumin_interactions_a1b2c3d4.firecrawl.meta.json
+│   ├── Vitamin_D_and_chemo_e5f6g7h8.firecrawl.md
+│   ├── Vitamin_D_and_chemo_e5f6g7h8.firecrawl.meta.json
+│   └── .progress.json
+├── cachexia_sarcopenia/
+│   └── ...
+└── .progress.json                    # Resume tracking
+```
+
+The `.firecrawl.md` files include an HTML comment header with DOI, PMID, title, source URL, and extraction timestamp.
+
+---
+
+## Stage 2: Q/A Trainer (`mupdf_trainer_v3.py`)
+
+### Pipeline Phases
+
+| Phase | Name | Description |
+|-------|------|-------------|
+| 1 | **Text Source** | Route to Firecrawl markdown or local mupdf PDF extraction |
+| 2 | **Chunk** | Split text into word-bounded chunks (default: 600 words, 100 overlap) |
+| 3 | **Relevance Gate** | LLM scores chunk relevance (score < 6 → rejected) |
+| 4 | **Augment** | LLM enriches accepted chunks with contextual detail |
+| 5 | **Generate Q/A** | LLM generates freeform short-answer Q/A pairs per chunk |
+| 6 | **Verify** | Optional verification loop with up to 2 regeneration attempts |
+| 7 | **Output** | Write JSONL training pairs + master summary report |
+
+### Text Source Routing (`--text-source`)
+
+The `get_text()` function selects extraction method and returns a 3-tuple: `(text, pages, source_used)`.
+
+| Flag | Behavior |
+|------|----------|
+| `auto` (default) | Use `.firecrawl.md` if it exists alongside the PDF path; otherwise fall back to mupdf |
+| `firecrawl` | Require `.firecrawl.md`; error if missing |
+| `mupdf` | Always use local PDF extraction via PyMuPDF (original v3 behavior) |
+
+**File mapping convention:**
+```
+Harvester creates:  stem.firecrawl.md
+Trainer discovers:  stem.firecrawl.md → creates pseudo path stem.pdf
+get_text() routes:  stem.pdf → looks for stem.firecrawl.md → strips markdown → returns text
+```
+
+The `_strip_markdown()` function converts Firecrawl markdown to plain text by removing HTML comments, images, links, headers, bold/italic markers, tables, code fences, blockquotes, and list markers while preserving content.
+
+### Recursive Directory Scanning
+
+The trainer uses `rglob` to recurse into all topic subdirectories automatically:
+
+```bash
+# Process ALL topics at once
+python mupdf_trainer_v3.py ./harvested_papers --gen_qa \
+    --llm_model gpt-4.1-mini --qa_k 1 --rpm 20 --pretty_json
+
+# Process a single topic folder
+python mupdf_trainer_v3.py ./harvested_papers/drug_nutrient --gen_qa \
+    --llm_model gpt-4.1-mini --qa_k 1 --rpm 20 --pretty_json
+```
+
+### Observability
+
+**Per-file logging:**
+```
+=== Processing: Curcumin_interactions_a1b2c3d4.pdf ===
+  Text source: firecrawl | 12 pages | 34,521 chars
+  Pages: 12 | Chunks: 8
+```
+
+**Master summary report** (`MASTER_SUMMARY.txt`) includes:
+- Text source breakdown: `Text Sources: 142 firecrawl | 3 mupdf`
+- Per-PDF text source in the file-by-file breakdown
+- Total PDFs, questions, chunks, and timing
+
+---
+
+## Supporting Tools
+
+### `firecrawl_extract.py` (standalone utility)
+Batch-extracts text from already-downloaded PDFs using Firecrawl. Useful for retroactively creating `.firecrawl.md` files from existing PDF collections without re-running the harvester.
+
+### `mine_plos_genetics.py` (Nick's reference)
+Reference implementation showing Firecrawl REST API approach for PLoS Genetics. Queries PLoS API → sends article URL to Firecrawl `/scrape` → saves `.txt` with attribution. This was the model for the harvester's Firecrawl integration.
+
+### `trainer_firecrawl_patch.py` (applied — reference only)
+Patch notes describing the three changes applied to `mupdf_trainer_v3.py`:
+1. `extract_from_firecrawl_md()` — read `.firecrawl.md` files
+2. `get_text()` — router function for text source selection
+3. `--text-source` CLI argument
 
 ---
 
 ## File Inventory
 
-| File | Lines | Role |
-|------|------:|------|
-| `mupdf_trainer_v3.py` | 1,364 | Main orchestrator — PDF extraction, chunking, Q/A generation, verification loop, JSONL output |
-| `llm_adapter.py` | 326 | Universal LLM backend — supports Together AI + OpenAI with auto-detection |
-| `prompts_qa.py` | 349 | All prompt templates (relevance, augment, freeform, seen-answers dedup) |
-| `qa_pipeline_skeleton_v2.py` | 109 | Freeform-only skeleton — relevance gate + chunk augmentation |
-| `verification_qa.py` | 981 | Heuristic pre-checks + LLM semantic verification with confidence scoring |
-| `duplicate_triage.py` | 811 | Two-phase dedup: semantic similarity → Excel workbook → human review → clean JSONL |
-| `compile_qa.py` | 264 | Final CSV export from deduplicated JSONL |
-| **Total** | **4,204** | |
-
----
-
-## Pipeline Stages (Detail)
-
-### Stage 1: PDF Extraction & Chunking
-**File:** `mupdf_trainer_v3.py` (lines 112–179)
-
-```
-PDF → PyMuPDF → raw text → clean_text() → chunk_text_words()
-```
-
-- Extracts plain text from each PDF page using PyMuPDF
-- Cleans whitespace (tabs, multiple spaces)
-- Splits into overlapping word-based chunks (default: 800 words, 50-word overlap)
-
-### Stage 2: Relevance Gate
-**File:** `qa_pipeline_skeleton_v2.py` → `gate_chunk()`
-
-The skeleton receives injected `llm_fn` and `json_parser_fn` from the trainer (dependency injection pattern). It calls the LLM to score chunk relevance on a 1-10 scale.
-
-- Score < 6 → rejected (junk: references, copyright, metadata)
-- Content type in `{references, metadata, copyright}` → rejected
-- LLM call: 1 per chunk
-
-### Stage 3: Chunk Augmentation
-**File:** `qa_pipeline_skeleton_v2.py` → `augment_chunk()`
-
-Enriches accepted chunks with contextual detail for better Q/A generation.
-- LLM call: 1 per accepted chunk
-
-### Stage 4: Freeform Q/A Generation
-**File:** `mupdf_trainer_v3.py` → `generate_qas_from_chunk_together()` (lines 248–281)
-
-Generates short-answer Q/A pairs from the augmented chunk.
-
-- Uses `prompts_qa.FREEFORM_USER` template with 5 placeholders: `{k}`, `{passage}`, `{no_source_meta}`, `{strict_json}`, `{seen_answers_block}`
-- **Seen-answers dedup** (2026-02-11): Injects prior chunk answers via `build_seen_answers_block()` to reduce within-PDF duplicates
-- Answers constrained to 1-3 words for exact-match RLHF grading (longer answers are skipped)
-- LLM call: 1 per accepted chunk
-
-### Stage 5: Verification (Optional)
-**File:** `verification_qa.py` + trainer wrapper functions (lines 414–473)
-
-Two-stage verification when `--enable-verification` is set:
-
-1. **Heuristic pre-check** (`pre_verify_freeform`): Forbidden reference patterns, safety term detection, structural checks (answer length, question mark presence)
-2. **LLM semantic verification** (`build_freeform_verification_messages` → LLM → `parse_freeform_verification_result`): Factual accuracy, self-containment, clinical safety, educational value
-
-Confidence scoring:
-- >= 0.9 → auto-pass
-- 0.7–0.9 → flag for review
-- < 0.7 → fail → regenerate (up to 2 attempts) or discard
-
-### Stage 6: JSONL Output
-**File:** `mupdf_trainer_v3.py` → `run_pipeline()` (lines 1139–1269)
-
-Each accepted Q/A pair is written as a JSON record:
-```json
-{
-  "type": "freeform",
-  "model": "gpt-4.1-mini",
-  "timestamp": "2026-02-24 10:30:00",
-  "file": "paper_name.pdf",
-  "chunk_id": 5,
-  "qa_id": "ff-5-0",
-  "passage_hash": "a1b2c3d4e5",
-  "question": "What enzyme catalyzes the reaction?",
-  "answer": "IDO1",
-  "verification": {
-    "status": "pass",
-    "confidence": 0.95,
-    "safety_flagged": false
-  }
-}
-```
-
-Supports two output formats:
-- Standard JSONL (one record per line)
-- Pretty JSON with `---` separators (`--pretty_json`)
-
-### Stage 7: Duplicate Triage (Post-processing)
-**File:** `duplicate_triage.py`
-
-Human-in-the-loop deduplication using sentence-transformers (`all-mpnet-base-v2`):
-
-- **Phase 1 (`--triage`):** Embeds all questions + answers, finds similar pairs via `paraphrase_mining`, classifies as `true_duplicate` / `near_duplicate` / `answer_conflict`, flags safety-critical conflicts, outputs Excel workbook with dropdown decisions
-- **Phase 2 (`--apply`):** Reads human decisions (keep/remove/merge/review_later) from workbook, produces clean JSONL
-
-### Stage 8: CSV Compilation (Final Export)
-**File:** `compile_qa.py`
-
-Reads deduplicated JSONL → outputs CSV with columns: `qa_id`, `question`, `answer`, `file`, `model`, `confidence`
+| File | Role |
+|------|------|
+| `nore_paper_harvester.py` | Stage 1 — discover, screen, extract/download papers |
+| `mupdf_trainer_v3.py` | Stage 2 — text routing, chunking, Q/A generation, verification, JSONL output |
+| `llm_adapter.py` | Universal LLM backend — Together AI + OpenAI with auto-detection |
+| `prompts_qa.py` | All prompt templates (relevance, augment, freeform, seen-answers dedup) |
+| `qa_pipeline_skeleton_v2.py` | Freeform-only skeleton — relevance gate + chunk augmentation |
+| `verification_qa.py` | Heuristic pre-checks + LLM semantic verification with confidence scoring |
+| `duplicate_triage.py` | Two-phase dedup: similarity detection → Excel workbook → human review → clean JSONL |
+| `compile_qa.py` | Final CSV export from deduplicated JSONL |
+| `firecrawl_extract.py` | Standalone batch Firecrawl extraction for existing PDFs |
+| `mine_plos_genetics.py` | Nick's PLoS Genetics reference (read-only) |
+| `trainer_firecrawl_patch.py` | Patch notes (already applied to trainer) |
 
 ---
 
@@ -170,13 +251,11 @@ llm_adapter.py
         └─ backend="together" → Together() client → chat.completions.create()
 ```
 
-Singleton clients: instantiated once per session to avoid repeated auth.
-
 **Dependency injection chain:**
 ```
-skeleton calls:  llm_fn(model, messages, 0.2, 1024)         [4 positional args]
-trainer wrapper: llm_chat_together(model, messages, temp, max_tokens, top_p=0.9)  [5 params, 5th defaults]
-adapter:         llm_chat_universal(model, messages, temp, max_tokens, top_p, backend)  [6 params, 5th+6th default]
+skeleton calls:  llm_fn(model, messages, 0.2, 1024)
+trainer wrapper: llm_chat_together(model, messages, temp, max_tokens, top_p=0.9)
+adapter:         llm_chat_universal(model, messages, temp, max_tokens, top_p, backend)
 ```
 
 ---
@@ -184,119 +263,169 @@ adapter:         llm_chat_universal(model, messages, temp, max_tokens, top_p, ba
 ## Data Flow Summary
 
 ```
-PDFs (101 papers)
+PubMed + Europe PMC
   │
   ▼
-qa_jsonl/                    ← per-PDF JSONL + summary files (205 files)
+nore_paper_harvester.py
+  │  (Firecrawl default / PDF opt-in)
+  ▼
+harvested_papers/              ← .firecrawl.md or .pdf per topic folder
+  │
+  ▼
+mupdf_trainer_v3.py            ← auto-detects text source
+  │
+  ▼
+qa_output/                     ← per-PDF JSONL + MASTER_SUMMARY.txt
   │
   ▼
 duplicate_triage.py --triage
   │
   ▼
-triage_workbook.xlsx         ← human reviews in Excel
+triage_workbook.xlsx           ← human reviews in Excel
   │
   ▼
 duplicate_triage.py --apply
   │
   ▼
-qa_clean.jsonl               ← deduplicated records
+qa_clean.jsonl                 ← deduplicated records
   │
   ▼
 compile_qa.py
   │
   ▼
-qa_output.csv                ← final dataset for RLHF training (Aurora)
+qa_output.csv                  ← final dataset for RLHF training (Aurora)
 ```
 
 ---
 
 ## CLI Reference
 
-### Main Pipeline
+### Harvester
 ```bash
-# Basic generation (verification disabled)
+# Default: Firecrawl text extraction (no PDFs)
+python nore_paper_harvester.py --email you@university.edu
+
+# Single topic with limit
+python nore_paper_harvester.py --email you@university.edu --topic drug_nutrient --max-per-topic 100
+
+# Download PDFs locally (for RLHF traceability)
+python nore_paper_harvester.py --email you@university.edu --download-pdfs
+
+# Resume interrupted run
+python nore_paper_harvester.py --email you@university.edu --resume
+
+# Skip LLM screening
+python nore_paper_harvester.py --email you@university.edu --no-screen
+```
+
+### Trainer
+```bash
+# Process all topics (recurses into subdirectories)
+python mupdf_trainer_v3.py ./harvested_papers --gen_qa \
+  --llm_model gpt-4.1-mini --qa_k 1 --rpm 20 --pretty_json
+
+# Force Firecrawl text only (error if .firecrawl.md missing)
+python mupdf_trainer_v3.py ./harvested_papers --gen_qa \
+  --text-source firecrawl --llm_model gpt-4.1-mini --qa_k 1 --rpm 20
+
+# Force local PDF extraction (original v3 behavior)
 python mupdf_trainer_v3.py ./pdfs --gen_qa \
-  --llm_model gpt-4.1-mini \
-  --qa_k 1 --rpm 30 --pretty_json
+  --text-source mupdf --llm_model gpt-4.1-mini --qa_k 1 --rpm 20
 
 # With verification enabled
-python mupdf_trainer_v3.py ./pdfs --gen_qa \
-  --llm_model gpt-4.1-mini \
-  --enable-verification --qa_k 1 --rpm 30
-
-# Force Together AI backend
-python mupdf_trainer_v3.py ./pdfs --gen_qa \
-  --llm_model "moonshotai/Kimi-K2-Instruct-0905" \
-  --llm_backend together
+python mupdf_trainer_v3.py ./harvested_papers --gen_qa --enable-verification \
+  --llm_model gpt-4.1-mini --qa_k 1 --rpm 20 --pretty_json
 
 # Smoke test LLM connectivity
 python mupdf_trainer_v3.py --llm_smoke_test
 
-# Generate overall summary of existing JSONL files
-python mupdf_trainer_v3.py --summarize --summary_dir qa_jsonl
+# Summarize existing JSONL files
+python mupdf_trainer_v3.py --summarize --summary_dir qa_output
 ```
 
 ### Deduplication
 ```bash
 # Phase 1: Generate triage workbook
-python duplicate_triage.py --triage --dir qa_jsonl --out triage_workbook.xlsx
+python duplicate_triage.py --triage --dir qa_output --out triage_workbook.xlsx
 
 # Phase 2: Apply human decisions
-python duplicate_triage.py --apply --workbook triage_workbook.xlsx --dir qa_jsonl
+python duplicate_triage.py --apply --workbook triage_workbook.xlsx --dir qa_output
 
 # Quick stats
-python duplicate_triage.py --stats-only --dir qa_jsonl
+python duplicate_triage.py --stats-only --dir qa_output
 ```
 
 ### CSV Compilation
 ```bash
-python compile_qa.py --input-dir qa_jsonl --output qa_output.csv
+python compile_qa.py --input-dir qa_output --output qa_output.csv
 ```
 
 ---
 
 ## Key Design Decisions
 
-### Why freeform-only? (v3 vs v2)
-The v2 pipeline generated MCQs, reasoning questions, AND freeform Q/A. 
+### Why Firecrawl as default? (v4)
+- **No local PDF dependency:** Server-side extraction eliminates PyMuPDF layout issues (columns, tables, headers/footers blending into text)
+- **Better text quality:** Firecrawl's PDF parser produces structured markdown with clean section separation
+- **Faster pipeline:** No download + extraction step; single API call returns text
+- **PDF opt-in preserved:** `--download-pdfs` keeps original files for RLHF traceability per Nick's recommendation
+
+### Why freeform-only? (v3)
 - MCQ answers were 7-15 words — too long for exact-match RLHF grading
-- Reasoning was converted to MCQ format but was redundant
-- Freeform already produces clean 1-3 word answers gradable by exact string match
-- Simplifying to freeform-only cut skeleton complexity from 250+ lines to 109 lines
+- Freeform produces clean 1-3 word answers gradable by exact string match
+- Simplifying to freeform-only cut skeleton from 250+ to 109 lines
 
 ### Why human-in-the-loop dedup?
-Previous automated dedup (Union-Find clustering in `duplicate_detector.py`) destroyed 85% of data through transitive chaining. The current `duplicate_triage.py` uses direct pairwise comparison only, with all removal decisions requiring human confirmation in Excel.
+Previous automated dedup (Union-Find clustering) destroyed 85% of data through transitive chaining. Current `duplicate_triage.py` uses direct pairwise comparison only, with all removal decisions requiring human confirmation in Excel.
 
 ### Why seen-answers injection?
-Within a single PDF, the same factual question can be generated from overlapping chunks. The `build_seen_answers_block()` function injects prior chunk answers into the prompt to explicitly ask the LLM to avoid repeating them.
+Within a single PDF, the same factual question can be generated from overlapping chunks. `build_seen_answers_block()` injects prior chunk answers into the prompt to reduce within-PDF duplicates.
 
 ---
 
 ## Environment
 
 ```bash
-# Required packages
-pip install pymupdf openai together python-dotenv tqdm sentence-transformers pandas openpyxl
+# Activate virtual environment
+source pymupdf-venv/bin/activate
+
+# Install dependencies
+pip install pymupdf openai together python-dotenv tqdm firecrawl
+pip install sentence-transformers pandas openpyxl  # for dedup stage
 
 # Environment variables (.env)
-OPENAI_API_KEY=sk-...
-TOGETHER_API_KEY=...
-TOGETHER_MODEL=moonshotai/Kimi-K2-Instruct-0905   # optional default
-OPENAI_MODEL=gpt-4.1-mini                          # optional default
+FIRECRAWL_API_KEY=fc-...          # Required for default Firecrawl mode
+NCBI_API_KEY=...                   # Recommended for faster PubMed rate limits
+OPENAI_API_KEY=sk-...              # Required for screening + Q/A generation
+TOGETHER_API_KEY=...               # Optional alternative LLM backend
+GEMINI_API_KEY=...                 # Optional alternative LLM backend
 ```
 
 ---
 
-## Dead Code / Technical Debt
+## Quick Start
 
-The following code exists in `mupdf_trainer_v3.py` but is unreachable since the skeleton was simplified to freeform-only:
+```bash
+# 1. Activate environment
+source pymupdf-venv/bin/activate
 
-| Lines | Description | Risk |
-|-------|-------------|------|
-| 286–347 | `verify_mcq()` function | None (never called) |
-| 350–411 | `verify_reasoning()` function | None (never called) |
-| 757–841 | MCQ/reasoning verification loop | None (gated by `pipe_out.get("reasoning")` which is always None) |
-| 1175–1202 | MCQ JSONL output block | None (iterates empty list) |
-| 1205–1233 | Reasoning JSONL output block | None (checks None) |
+# 2. Install Firecrawl SDK
+pip install firecrawl
 
-These can be safely removed to reduce the trainer from ~1,364 to ~1,100 lines.
+# 3. Ensure .env has FIRECRAWL_API_KEY, NCBI_API_KEY, OPENAI_API_KEY
+
+# 4. Harvest papers (Firecrawl mode — default)
+python nore_paper_harvester.py --email you@university.edu
+
+# 5. Generate Q/A training pairs (processes all topic folders)
+python mupdf_trainer_v3.py ./harvested_papers --gen_qa \
+    --llm_model gpt-4.1-mini --qa_k 1 --rpm 20 --pretty_json
+
+# 6. Deduplicate
+python duplicate_triage.py --triage --dir qa_output --out triage_workbook.xlsx
+# ... review in Excel ...
+python duplicate_triage.py --apply --workbook triage_workbook.xlsx --dir qa_output
+
+# 7. Export final CSV
+python compile_qa.py --input-dir qa_output --output qa_output.csv
+```

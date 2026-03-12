@@ -1,23 +1,42 @@
 #==============================================================================
 # NORE Q/A Generation Pipeline v3
 #==============================================================================
-# Updated version with integrated verification system
-# 
-# Key changes from v2:
-# - Integrated verification_qa.py for Q/A quality assurance
-# - Added verification loop with up to 2 regeneration attempts
-# - Tracks verification statistics (pass/fail/review/discard)
-# - Outputs verification metadata with each Q/A pair
+# Multi-source text extraction with integrated verification system.
 #
-# Pipeline: PDF â†’ Extract â†’ Chunk â†’ Generate Q/A â†’ Verify â†’ Output
+# Key features:
+# - Dual text source: Firecrawl (.firecrawl.md) or local mupdf PDF extraction
+# - --text-source flag: ‘auto’ (default), ‘firecrawl’, or ‘mupdf’
+# - Auto mode prefers Firecrawl text when available, falls back to mupdf
+# - Integrated verification_qa.py for Q/A quality assurance
+# - Verification loop with up to 2 regeneration attempts
+# - Seen-answers dedup to avoid repetitive Q/A pairs
+#
+# Pipeline: Text Source -> Chunk -> Generate Q/A -> Verify -> Output
 #
 # Usage:
-## Basic usage (verification disabled)
-# python mupdf_trainer_v3.py ./pdfs --gen_qa --llm_model meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo
-# With verification enabled
-# python mupdf_trainer_v3.py ./pdfs --gen_qa --enable-verification --llm_model meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo --pretty_json
+#   # Process ALL topics at once (recurses into subdirectories)
+#   python mupdf_trainer_v3.py ./harvested_papers --gen_qa --llm_model "gpt-4.1-mini" --qa_k 1 --rpm 20 --pretty_json
+#       
+#
+#   # Process a single topic folder
+#   python mupdf_trainer_v3.py ./harvested_papers/drug_nutrient --gen_qa \
+#       --llm_model gpt-4.1-mini --qa_k 1 --rpm 20 --pretty_json
+#
+#   # Force Firecrawl text only (error if .firecrawl.md missing)
+#   python mupdf_trainer_v3.py ./harvested_papers --gen_qa \
+#       --text-source firecrawl --llm_model gpt-4.1-mini --qa_k 1 --rpm 20 --pretty_json
+#
+#   # Force local PDF extraction via mupdf (original behavior)
+#   python mupdf_trainer_v3.py ./pdfs --gen_qa \
+#       --text-source mupdf --llm_model gpt-4.1-mini --qa_k 1 --rpm 20 --pretty_json
+#
+#   # With verification enabled
+#   python mupdf_trainer_v3.py ./harvested_papers --gen_qa --enable-verification \
+#       --llm_model gpt-4.1-mini --qa_k 1 --rpm 20 --pretty_json
+#
+# 
 #==============================================================================
-# SETUP INSTRUCTIONS
+# SETUP
 #==============================================================================
 # python -m venv .venv
 # source .venv/bin/activate
@@ -27,15 +46,10 @@
 # python -m pip install --upgrade pip
 # pip install --upgrade pymupdf
 # pip install -r requirements.txt 
+# pip install firecrawl
+
 # export OPENAI_API_KEY=...
-# export DEEPSEEK_API_KEY=...
-# export PINECONE_API_KEY=......
-# export PINECONE_ENV=...us-west1-gcp
-# export MODEL=gpt-5-mini
-# export PINECONE_INDEX=paper-qa
-# python mupdf_trainer_v3.py ./pdfs --gen_qa --llm_model "moonshotai/Kimi-K2-Instruct-0905" --qa_k 1 --rpm 20 --pretty_json
-# (where ./pdfs is a folder of PDFs to process)
-# togerher model = OpenAI/gpt-oss-20B or meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo
+# export TOGETHER_API_KEY=...  (if using Together models)
 
 #-----------IMPORTS----------------
 from pathlib import Path
@@ -123,20 +137,13 @@ def extract_text_from_pdf(pdf_path: str) -> Tuple[str, int]:
     raw_text = "\n\f\n".join(page_texts)  # \f = form feed as a page break
     num_pages = doc.page_count
     logging.info(f"Extracted {num_pages} pages from {pdf_path}")
-
-    # sanity check
-    if 1:
-        print(f"[extract_text_from_pdf] Extracted {num_pages} pages, preview: {raw_text[:300]}")
- 
     return raw_text, num_pages
 
 
 #-----------CLEANING FUNCTION----------------
 def clean_text(text: str) -> str: 
     text = text.replace("\t", " ")
-    text = " ".join(text.split()) 
-    if 1:
-        print(f"[clean_text] Cleaned text preview: {text[:300]}")
+    text = " ".join(text.split())
     return text.strip()
 
 def extract_and_clean(pdf_path: str) -> Tuple[str, int]:
@@ -145,10 +152,134 @@ def extract_and_clean(pdf_path: str) -> Tuple[str, int]:
     is exactly the extracted string from the PDF.
     """
     raw_text, num_pages = extract_text_from_pdf(pdf_path)
-    cleaned_text = clean_text(raw_text)  
-    if 1:
-        print(f"[extract_and_clean] Cleaned text preview: {cleaned_text[:300]}") 
+    cleaned_text = clean_text(raw_text)
     return cleaned_text, num_pages
+
+
+#-----------FIRECRAWL TEXT SOURCE----------------
+
+def _strip_markdown(markdown: str) -> str:
+    """
+    Convert Firecrawl markdown to plain text for the chunking pipeline.
+    Preserves content but removes formatting syntax.
+    """
+    text = markdown
+
+    # Remove HTML comments (metadata header from firecrawl_extract.py)
+    text = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
+
+    # Remove images
+    text = re.sub(r'!\[.*?\]\(.*?\)', '', text)
+
+    # Convert links to just their text
+    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+
+    # Remove header markers (keep the text)
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+
+    # Remove bold/italic markers
+    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+    text = re.sub(r'\*([^*]+)\*', r'\1', text)
+    text = re.sub(r'__([^_]+)__', r'\1', text)
+    text = re.sub(r'_([^_]+)_', r'\1', text)
+
+    # Convert markdown tables to space-separated text
+    text = re.sub(r'^\|[-:\s|]+\|$', '', text, flags=re.MULTILINE)  # Remove border rows
+    text = re.sub(r'\|', '  ', text)  # Convert cell separators
+
+    # Remove horizontal rules
+    text = re.sub(r'^[-*_]{3,}$', '', text, flags=re.MULTILINE)
+
+    # Remove code fences
+    text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+
+    # Remove blockquote markers
+    text = re.sub(r'^>\s?', '', text, flags=re.MULTILINE)
+
+    # Remove list markers (keep content)
+    text = re.sub(r'^\s*[-*+]\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
+
+    # Collapse whitespace
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r'[ \t]+', ' ', text)
+
+    return text.strip()
+
+
+def extract_from_firecrawl_md(pdf_path: str) -> Tuple[str, int]:
+    """
+    Read pre-extracted Firecrawl markdown for a PDF and convert to plain text.
+    Expects a .firecrawl.md file alongside the PDF (created by firecrawl_extract.py
+    or by nore_paper_harvester.py in default Firecrawl mode).
+
+    Returns (cleaned_text, estimated_pages) — same signature as extract_and_clean().
+    """
+    pdf_p = Path(pdf_path)
+    md_path = pdf_p.with_suffix(".firecrawl.md")
+
+    if not md_path.exists():
+        raise FileNotFoundError(f"No Firecrawl text found: {md_path}")
+
+    with open(md_path, "r", encoding="utf-8") as f:
+        markdown = f.read()
+
+    # Strip markdown formatting to plain text
+    text = _strip_markdown(markdown)
+
+    # Estimate page count from text length (~3000 chars per page for academic papers)
+    estimated_pages = max(1, len(text) // 3000)
+
+    cleaned = clean_text(text)
+    logging.info(f"Loaded Firecrawl text for {pdf_p.name}: {len(cleaned)} chars (~{estimated_pages} pages)")
+
+    return cleaned, estimated_pages
+
+
+def get_text(pdf_path: str, text_source: str = "auto") -> Tuple[str, int, str]:
+    """
+    Router function that selects extraction method based on --text-source flag.
+
+    Args:
+        pdf_path: Path to the PDF file (or base path for .firecrawl.md lookup)
+        text_source: One of 'auto', 'firecrawl', 'mupdf'
+
+    Returns: (cleaned_text, num_pages, source_used)
+        source_used is 'firecrawl' or 'mupdf' — indicates which method was actually used.
+
+    Behavior:
+        'auto'      -> use .firecrawl.md if it exists, else fall back to mupdf
+        'firecrawl' -> require .firecrawl.md, error if missing
+        'mupdf'     -> always use local PDF extraction (original behavior)
+    """
+    pdf_p = Path(pdf_path)
+    md_path = pdf_p.with_suffix(".firecrawl.md")
+    has_firecrawl = md_path.exists()
+
+    if text_source == "firecrawl":
+        if not has_firecrawl:
+            raise FileNotFoundError(
+                f"--text-source=firecrawl but no .firecrawl.md for {pdf_p.name}. "
+                f"Run firecrawl_extract.py first."
+            )
+        text, pages = extract_from_firecrawl_md(pdf_path)
+        return text, pages, "firecrawl"
+
+    elif text_source == "auto":
+        if has_firecrawl:
+            logging.info(f"  Using Firecrawl text for {pdf_p.name}")
+            text, pages = extract_from_firecrawl_md(pdf_path)
+            return text, pages, "firecrawl"
+        else:
+            logging.info(f"  Using mupdf extraction for {pdf_p.name} (no .firecrawl.md)")
+            text, pages = extract_and_clean(pdf_path)
+            return text, pages, "mupdf"
+
+    else:  # "mupdf"
+        text, pages = extract_and_clean(pdf_path)
+        return text, pages, "mupdf"
+
 
 #-----------CHUNKING FUNCTION----------------
 def chunk_text_words(
@@ -174,8 +305,6 @@ def chunk_text_words(
         chunk_words = words[i:i + max_words]
         chunks.append(" ".join(chunk_words))
         i += step
-    if 1:
-        print(f"[chunk_text_words] Created {len(chunks)} chunks, preview of first chunk: {chunks[0][:300]}")
     return chunks
 
 #-----------HELPER FUNCTIONS (Hashing, JSON Parsing)----------------
@@ -962,9 +1091,16 @@ def write_master_summary(qa_dir: Path, run_stats: list[dict], run_start_time: fl
         f.write(f"\n{'='*80}\n")
         f.write("OVERALL STATISTICS\n")
         f.write(f"{'='*80}\n")
-        f.write(f"Total PDFs Processed: {total_pdfs}\n")
+        f.write(f"Total Files Processed: {total_pdfs}\n")
         f.write(f"Total Chunks Processed: {total_chunks}\n")
         f.write(f"Total Questions Generated: {total_questions}\n")
+
+        # Text source breakdown
+        firecrawl_count = sum(1 for s in run_stats if s.get('text_source') == 'firecrawl')
+        mupdf_count = sum(1 for s in run_stats if s.get('text_source') == 'mupdf')
+        f.write(f"\nText Source Breakdown:\n")
+        f.write(f"  - Firecrawl: {firecrawl_count}\n")
+        f.write(f"  - mupdf (local PDF): {mupdf_count}\n")
         f.write(f"\nQuestion Type Breakdown:\n")
         f.write(f"  - MCQs: {total_mcqs} ({(total_mcqs/max(total_questions,1)*100):.1f}%)\n")
         f.write(f"  - Reasoning: {total_reasoning} ({(total_reasoning/max(total_questions,1)*100):.1f}%)\n")
@@ -990,6 +1126,7 @@ def write_master_summary(qa_dir: Path, run_stats: list[dict], run_start_time: fl
 
         for i, stats in enumerate(run_stats, 1):
             f.write(f"[{i}/{total_pdfs}] {stats['pdf_name']}\n")
+            f.write(f"  Text Source: {stats.get('text_source', 'unknown')}\n")
             f.write(f"  Chunks: {stats['chunks']}\n")
             f.write(f"  Total Questions: {stats['questions']}\n")
             f.write(f"    - MCQs: {stats['mcq']}\n")
@@ -1034,14 +1171,32 @@ def run_pipeline(args: argparse.Namespace):
     files = []
     if p.is_file() and p.suffix.lower() == ".pdf":
         files = [p]
+    elif p.is_file() and p.name.endswith(".firecrawl.md"):
+        # Single Firecrawl markdown file — synthesize a "pdf_path" for the router
+        files = [p.with_suffix("").with_suffix(".pdf")]
     elif p.is_dir():
-        files = sorted(p.glob("*.pdf"))
+        # Search for PDFs — use rglob to recurse into topic subdirectories
+        files = sorted(p.rglob("*.pdf"))
+        # Also discover .firecrawl.md files that have no corresponding PDF
+        # Harvester names these as stem.firecrawl.md; we create a pseudo .pdf path
+        # so get_text() can find the .firecrawl.md via stem.firecrawl.md lookup
+        if args.text_source in ("auto", "firecrawl"):
+            for md in sorted(p.rglob("*.firecrawl.md")):
+                # stem.firecrawl.md -> stem.pdf  (strip double suffix)
+                stem = md.name
+                if stem.endswith(".firecrawl.md"):
+                    stem = stem[:-len(".firecrawl.md")]
+                pseudo_pdf = md.parent / f"{stem}.pdf"
+                if pseudo_pdf not in files:
+                    files.append(pseudo_pdf)
+            files = sorted(files)
     else:
-        logging.error(f"Not a PDF file or folder: {p}")
+        logging.error(f"Path not found or not a PDF/folder: {p}\n"
+                      f"  If using Firecrawl mode, run nore_paper_harvester.py first to create the output directory.")
         sys.exit(1)
 
     if not files:
-        logging.error(f"No PDFs found in {p}")
+        logging.error(f"No PDFs or .firecrawl.md files found in {p}")
         sys.exit(1)
 
     # Track statistics for master summary
@@ -1061,7 +1216,8 @@ def run_pipeline(args: argparse.Namespace):
     for pdf in files:
         logging.info(f"\n=== Processing: {pdf.name} ===")
         try:
-            cleaned, n_pages = extract_and_clean(str(pdf))
+            cleaned, n_pages, text_source_used = get_text(str(pdf), text_source=args.text_source)
+            logging.info(f"  Text source: {text_source_used} | {n_pages} pages | {len(cleaned):,} chars")
         except Exception as e:
             logging.error(f"Failed to extract/clean {pdf.name}: {e}")
             continue # Skip to next PDF
@@ -1298,6 +1454,7 @@ def run_pipeline(args: argparse.Namespace):
             # Collect statistics for master summary
             run_stats.append({
                 'pdf_name': pdf.name,
+                'text_source': text_source_used,
                 'chunks': len(chunks),
                 'questions': wrote,
                 'mcq': mcq_count,
@@ -1336,6 +1493,12 @@ if __name__ == "__main__":
                     help="Force LLM backend (default: auto-detect from model name)")
     ap.add_argument("--no-seen-answers", action="store_true", dest="no_seen_answers",
                     help="Disable seen-answers dedup injection (not recommended)")
+    ap.add_argument("--text-source", choices=["auto", "firecrawl", "mupdf"],
+                    default="auto", dest="text_source",
+                    help="Text extraction method: "
+                         "'auto' = prefer .firecrawl.md, fall back to mupdf (default); "
+                         "'firecrawl' = require .firecrawl.md (error if missing); "
+                         "'mupdf' = always use local PDF extraction")
 
     ap.add_argument("--summarize", action="store_true", help="Generate overall summary of all *_qa.jsonl files and exit")
     ap.add_argument("--summary_dir", default="qa_jsonl", help="Directory containing *_qa.jsonl files for summary")
