@@ -1,6 +1,6 @@
 # NORE Q/A Generation Pipeline
 
-A two-stage pipeline for harvesting biomedical research papers and generating short-answer Q/A training data, designed for RLHF fine-tuning on Argonne National Lab's Aurora supercomputer.
+A two-stage pipeline for harvesting oncology nutrition research papers and generating short-answer Q/A training data using LIMO principles, designed for RLHF fine-tuning.
 
 **NORE** (Nutrition-Oncology Research Engine) produces exact-match Q/A pairs (1-3 word answers) from clinical nutrition and oncology literature for training domain-specific language models.
 
@@ -22,7 +22,7 @@ PubMed / Europe PMC
 └────────┬───────────────────────────┘
          │  JSONL
          ▼
-  Deduplicate → Compile CSV → RLHF Training (Aurora)
+  Deduplicate → Compile CSV → RLHF Training
 ```
 
 ### Stage 1: Harvest (`nore_paper_harvester.py`)
@@ -35,7 +35,7 @@ PubMed / Europe PMC
 ### Stage 2: Train (`mupdf_trainer_v3.py`)
 
 5. **Route** text source — auto-detects `.firecrawl.md` or falls back to local PDF extraction via PyMuPDF
-6. **Chunk** into overlapping word windows (600 words, 100-word overlap)
+6. **Chunk** into overlapping word windows (800 words, 50-word overlap)
 7. **Gate** chunks by relevance (filters out references, copyright, metadata)
 8. **Augment** accepted chunks with contextual enrichment
 9. **Generate** freeform Q/A pairs via LLM (OpenAI or Together AI)
@@ -56,7 +56,7 @@ PubMed / Europe PMC
 | `duplicate_triage.py` | Human-in-the-loop deduplication: semantic similarity to Excel workbook for review |
 | `compile_qa.py` | Final CSV export from deduplicated JSONL |
 | `firecrawl_extract.py` | Standalone batch tool: retroactively extract text from existing PDFs via Firecrawl |
-| `mine_plos_genetics.py` | Reference: Nick's Firecrawl example for PLoS Genetics |
+
 
 Supporting files: `llm_smoke_test.py`, `qa_analyzer.py`, `paper_qa.py`, `setup_env.py`, `run_pipeline.sh`
 
@@ -86,17 +86,17 @@ TOGETHER_API_KEY=...             # Optional alternative LLM backend
 ### 3. Harvest Papers
 
 ```bash
-# Default: Firecrawl text extraction (no PDFs downloaded)
-python nore_paper_harvester.py --email you@university.edu
+# Default: Firecrawl text extraction (no PDFs downloaded); requires your NCBI linked email
+python nore_paper_harvester.py --email your@email.com
 
 # Single topic with limit
-python nore_paper_harvester.py --email you@university.edu --topic drug_nutrient --max-per-topic 100
+python nore_paper_harvester.py --email your@email.com --topic drug_nutrient --max-per-topic 100
 
 # Download PDFs locally instead (for RLHF traceability)
-python nore_paper_harvester.py --email you@university.edu --download-pdfs
+python nore_paper_harvester.py --email your@email.com --download-pdfs
 
 # Resume interrupted run
-python nore_paper_harvester.py --email you@university.edu --resume
+python nore_paper_harvester.py --your@email.com --resume
 ```
 
 ### 4. Generate Q/A Training Data
@@ -126,7 +126,7 @@ python mupdf_trainer_v3.py ./harvested_papers --gen_qa --enable-verification \
 python mupdf_trainer_v3.py --llm_smoke_test
 ```
 
-### 5. Deduplicate
+### 5. Deduplicate 
 
 ```bash
 # Phase 1: Generate triage workbook for human review
@@ -269,4 +269,4 @@ When `--enable-verification` is set, each Q/A pair goes through:
 
 ## Context
 
-This pipeline is part of the **NORE** (Nutrition-Oncology Research Engine) project at [Baylor University Greathouse Lab](https://github.com/GreathouseLab), developed in collaboration with Argonne National Lab. The generated Q/A datasets are used for RLHF fine-tuning of domain-specific language models on the Aurora supercomputer for clinical nutrition and oncology applications.
+This pipeline is part of the **NORE** (Nutrition-Oncology Research Engine) project at [Baylor University Greathouse Lab](https://github.com/GreathouseLab), developed in collaboration with Argonne National Lab. The generated Q/A datasets are used for RLHF fine-tuning of domain-specific language models for clinical nutrition and oncology applications.
